@@ -9,6 +9,7 @@
 <meta name="theme-color" content="#FBF7EA">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" type="image/png" href="icon-192.png">
@@ -83,9 +84,11 @@ const KEY='spesa.v1';
 let S=null;
 try{S=JSON.parse(localStorage.getItem(KEY))}catch(e){}
 if(!S||!S.shops)S={shops:[],lists:[],showCats:true};
+S.sync=S.sync||{last:{},cursor:null,group:null,code:null};
 const uid=()=>Math.random().toString(36).slice(2,9);
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}};
-if(!S.shops.length){S.shops.push({id:uid(),name:'Il mio supermercato',cats:['Frutta e verdura','Forneria','Latticini e uova','Reparto carne','Reparto pesce','Dispensa','Surgelati','Bevande','Detersivi e igiene'].map(n=>({id:uid(),name:n}))});save()}
+function seed(){if(!S.shops.length){S.shops.push({id:uid(),name:'Il mio supermercato',cats:['Frutta e verdura','Forneria','Latticini e uova','Reparto carne','Reparto pesce','Dispensa','Surgelati','Bevande','Detersivi e igiene'].map(n=>({id:uid(),name:n}))});save()}}
+seed();
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const app=document.getElementById('app');
 let view={n:'home'};
@@ -112,7 +115,7 @@ function groups(l){const sh=shopOf(l);const g=sh.cats.map((c,i)=>({id:c.id,name:
 function home(){
  const ls=S.lists.map(l=>{const sh=shopOf(l),t=l.items.length,d=l.items.filter(i=>i.ck).length;
   return `<div class="card"><button class="lnk" data-act="open" data-id="${l.id}"><b>${esc(l.name)}</b><span class="mu">${esc(sh?sh.name:'Senza supermercato')}, ${d} di ${t} presi</span></button><div class="acts"><button class="ghost" data-act="dup" data-id="${l.id}">Duplica</button><button class="ghost danger" data-act="del" data-id="${l.id}">Elimina</button></div></div>`}).join('');
- return `<div class="top"><h1>Liste della spesa</h1></div><button class="pri full" data-act="newlist" style="margin-bottom:10px">Nuova lista</button><div class="bar"><button class="ghost" data-act="imp">Importa</button><button class="ghost" data-act="shops">Supermercati</button></div>${ls||'<div class="empty">Nessuna lista. Tocca «Nuova lista» per iniziare.</div>'}`;
+ return `<div class="top"><h1>Liste della spesa</h1></div><button class="pri full" data-act="newlist" style="margin-bottom:10px">Nuova lista</button><div class="bar"><button class="ghost" data-act="imp">Importa</button><button class="ghost" data-act="shops">Supermercati</button><button class="ghost" data-act="acc">Account</button></div>${U&&S.sync.group?`<p class="mu" id="st" style="margin:0 0 10px">${esc(ST||'Liste condivise con il gruppo')}</p>`:''}${ls||'<div class="empty">Nessuna lista. Tocca «Nuova lista» per iniziare.</div>'}`;
 }
 
 function listView(){
@@ -140,16 +143,17 @@ function shopView(){
 
 function render(){
  const y=window.scrollY,n=view.n+(view.id||'');
- app.innerHTML=view.n==='home'?home():view.n==='list'?listView():view.n==='shops'?shopsView():shopView();
+ app.innerHTML=view.n==='home'?home():view.n==='acc'?accView():view.n==='list'?listView():view.n==='shops'?shopsView():shopView();
  if(render.last===n)window.scrollTo(0,y);else window.scrollTo(0,0);
  render.last=n;view.just=null;
  if(view.focus){const e=app.querySelector(`[data-in="${view.focus}"]`);if(e)e.focus();view.focus=null}
 }
-const commit=()=>{save();render()};
+const commit=()=>{save();render();schedulePush()};
 const dateName=()=>'Spesa del '+new Date().toLocaleDateString('it-IT',{day:'numeric',month:'long'});
 
 const CHK='<svg viewBox="0 0 26 26" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14l6 6L23 5"/></svg>';
 const A={
+ acc(){view={n:'acc'}},login(){doAuth(false)},signup(){doAuth(true)},logout(){doLogout()},mkgroup(){mkGroup()},joingroup(){joinGroup()},syncnow(){pull().then(push)},
  home(){view={n:'home'}},
  shops(){view={n:'shops'}},
  open(e){view={n:'list',id:e.dataset.id,mode:'edit',open:new Set()}},
@@ -208,7 +212,118 @@ function importCode(t){
  }catch(e){toast('Link non valido')}
 }
 
-render();
+/* ===== Condivisione con Supabase ===== */
+const SB_URL='https://etmgilmdmvotppzmdihw.supabase.co',SB_KEY='sb_publishable_SvX8vscPGjgJNlZhx1Zwxw_smp5kX-4';
+let sb=null,U=null,chan=null,ST='',pushing=false,pt;
+try{sb=window.supabase.createClient(SB_URL,SB_KEY)}catch(e){}
+const $v=id=>{const e=document.getElementById(id);return e?e.value.trim():''};
+const cj=v=>Array.isArray(v)?'['+v.map(cj).join(',')+']':v&&typeof v==='object'?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+cj(v[k])).join(',')+'}':JSON.stringify(v);
+function setSt(t){ST=t;const e=document.getElementById('st');if(e)e.textContent=t}
+const live=()=>sb&&U&&S.sync.group;
+function flat(){const o={};S.shops.forEach(s=>o['s:'+s.id]=cj({name:s.name,cats:s.cats}));S.lists.forEach(l=>{o['l:'+l.id]=cj({name:l.name,shop:l.shopId});l.items.forEach(i=>o['i:'+i.id]=cj({l:l.id,c:i.cat,t:i.t,k:i.ck?1:0}))});return o}
+function schedulePush(){clearTimeout(pt);pt=setTimeout(push,500)}
+async function push(){
+ if(!live()||pushing)return;
+ const cur=flat(),L=S.sync.last,rows=[],now=Date.now();
+ for(const k in cur)if(cur[k]!==L[k])rows.push({tipo:k[0],id:k.slice(2),dati:JSON.parse(cur[k]),ts:now});
+ for(const k in L)if(!(k in cur))rows.push({tipo:k[0],id:k.slice(2),dati:null,ts:now,del:true});
+ if(!rows.length)return;
+ pushing=true;
+ const {error}=await sb.rpc('scrivi_righe',{p_gruppo:S.sync.group,p_righe:rows});
+ pushing=false;
+ if(error){setSt('Non sincronizzato, riprovo appena possibile');return}
+ rows.forEach(r=>{const k=r.tipo+':'+r.id;if(r.del)delete L[k];else L[k]=cur[k]});
+ save();setSt('Sincronizzato');schedulePush();
+}
+function ap(r){const d=r.dati;
+ if(r.tipo==='s'){let s=S.shops.find(x=>x.id===r.id);if(!s)S.shops.push(s={id:r.id});s.name=d.name;s.cats=d.cats}
+ else if(r.tipo==='l'){let l=S.lists.find(x=>x.id===r.id);if(!l)S.lists.unshift(l={id:r.id,items:[]});l.name=d.name;l.shopId=d.shop}
+ else{const l=S.lists.find(x=>x.id===d.l);if(!l)return false;let i=l.items.find(x=>x.id===r.id);if(!i)l.items.push(i={id:r.id});i.cat=d.c;i.t=d.t;i.ck=!!d.k}}
+function rm(r){if(r.tipo==='s')S.shops=S.shops.filter(x=>x.id!==r.id);else if(r.tipo==='l')S.lists=S.lists.filter(x=>x.id!==r.id);else S.lists.forEach(l=>l.items=l.items.filter(i=>i.id!==r.id))}
+function soft(){const a=document.activeElement;if(a&&/INPUT|TEXTAREA|SELECT/.test(a.tagName))return;render()}
+async function pull(){
+ if(!live())return;
+ let q=sb.from('righe').select('tipo,id,dati,ts,del,agg').eq('gruppo',S.sync.group).order('agg');
+ if(S.sync.cursor)q=q.gt('agg',new Date(Date.parse(S.sync.cursor)-5000).toISOString());
+ const {data,error}=await q;
+ if(error){setSt('Non sincronizzato, riprovo appena possibile');return}
+ if(!data.length){setSt('Sincronizzato');return}
+ const last=data[data.length-1].agg,ord={s:0,l:1,i:2},cur=flat(),L=S.sync.last;let ch=false;
+ data.sort((a,b)=>ord[a.tipo]-ord[b.tipo]);
+ for(const r of data){
+  const k=r.tipo+':'+r.id;
+  if(cur[k]!==L[k])continue;
+  if(r.del){if(cur[k]!==undefined){rm(r);ch=true}delete L[k];continue}
+  const js=cj(r.dati);
+  if(cur[k]!==js){if(ap(r)===false)continue;ch=true}
+  L[k]=js;
+ }
+ if(!S.sync.cursor||last>S.sync.cursor)S.sync.cursor=last;
+ save();setSt('Sincronizzato');if(ch)soft();
+}
+function sub(){
+ if(chan){sb.removeChannel(chan);chan=null}
+ if(!live())return;
+ chan=sb.channel('g'+S.sync.group).on('postgres_changes',{event:'*',schema:'public',table:'righe',filter:'gruppo=eq.'+S.sync.group},()=>pull()).subscribe();
+}
+async function adopt(g,code,created){
+ if(S.sync.group===g){S.sync.code=code;save();await pull();await push();sub();render();return}
+ const go=async keep=>{
+  if(!keep){S.shops=[];S.lists=[]}
+  S.sync={last:{},cursor:null,group:g,code};save();
+  await pull();seed();await push();sub();view={n:'acc'};render();
+ };
+ if(created||!S.lists.length)return go(created);
+ modal({title:'Liste già presenti',msg:'Su questo telefono ci sono già delle liste. Cosa vuoi fare?',select:[{v:'1',t:'Aggiungile al gruppo'},{v:'0',t:'Scartale e usa quelle del gruppo'}],ok:'Continua',cb:r=>go(r.sel==='1')});
+}
+async function findGroup(){
+ const {data}=await sb.from('membri').select('gruppo').limit(1);
+ if(data&&data[0]){const g=data[0].gruppo,c=await sb.from('gruppi').select('codice').eq('id',g).single();await adopt(g,c.data?c.data.codice:'',false)}
+}
+async function doAuth(reg){
+ const email=$v('em'),pw=$v('pw');
+ if(!email||!pw)return toast('Inserisci email e password');
+ if(!sb)return toast('Servizio non raggiungibile');
+ const r=reg?await sb.auth.signUp({email,password:pw}):await sb.auth.signInWithPassword({email,password:pw});
+ if(r.error||!r.data.session){
+  toast(r.error?(reg?'Registrazione non riuscita':'Email o password non corretti'):'Controlla la mail per confermare');
+  const a=document.getElementById('em');if(a)a.value=email;return}
+ U=r.data.session.user;await findGroup();render();
+}
+async function doLogout(){await sb.auth.signOut();U=null;if(chan){sb.removeChannel(chan);chan=null}setSt('');render()}
+async function mkGroup(){
+ const {data:g,error}=await sb.rpc('crea_gruppo');
+ if(error)return toast('Impossibile creare il gruppo');
+ const c=await sb.from('gruppi').select('codice').eq('id',g).single();
+ adopt(g,c.data?c.data.codice:'',true);
+}
+async function joinGroup(){
+ const code=$v('cd').toUpperCase();if(!code)return toast('Inserisci il codice');
+ const {data:g,error}=await sb.rpc('entra_gruppo',{p_codice:code});
+ if(error)return toast('Codice non valido o gruppo pieno');
+ adopt(g,code,false);
+}
+function accView(){
+ const top='<div class="top"><button class="ghost" data-act="home">‹ Liste</button><h1>Account</h1></div>',bx='<div class="card" style="padding:14px;display:grid;gap:10px">',p='<p style="margin:0">',m='<p class="mu" style="margin:0">';
+ if(!sb)return top+'<div class="empty">Servizio non raggiungibile. Controlla la connessione e riapri l\'app.</div>';
+ if(!U)return top+bx+m+'Accedi per condividere le liste con l\'altra persona.</p><input id="em" type="email" placeholder="Email" autocomplete="username" autocapitalize="none"><input id="pw" type="password" placeholder="Password (almeno 6 caratteri)" autocomplete="current-password"><button class="pri" data-act="login">Accedi</button><button class="ghost" data-act="signup" style="justify-content:center">Registrati</button></div>';
+ const who=p+'Connesso come <b>'+esc(U.email||'')+'</b></p>';
+ if(!S.sync.group)return top+bx+who+'<button class="pri" data-act="mkgroup">Crea il gruppo</button>'+m+'Oppure inserisci il codice che ti ha dato l\'altra persona:</p><input id="cd" placeholder="Codice del gruppo" autocapitalize="characters" autocomplete="off"><button class="ghost" data-act="joingroup" style="justify-content:center">Entra nel gruppo</button><button class="ghost" data-act="logout">Esci</button></div>';
+ return top+bx+who+p+'Codice del gruppo: <b style="font-size:34px;letter-spacing:2px">'+esc(S.sync.code||'')+'</b></p>'+m+'Dallo all\'altra persona: dopo la registrazione lo inserirà per entrare.</p><p class="mu" id="st" style="margin:0">'+esc(ST||'Sincronizzato')+'</p><button class="pri" data-act="syncnow">Sincronizza ora</button><button class="ghost" data-act="logout">Esci</button></div>';
+}
+async function startSync(){
+ if(!sb)return;
+ try{
+  const {data}=await sb.auth.getSession();U=data.session?data.session.user:null;
+  sb.auth.onAuthStateChange((ev,ses)=>{U=ses?ses.user:null});
+  if(U){if(!S.sync.group)await findGroup();else{await pull();await push();sub()}}
+  render();
+ }catch(e){}
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)pull().then(push)});
+addEventListener('online',()=>{pull().then(push)});
+setInterval(()=>{if(!document.hidden)pull()},30000);
+render();startSync();
 if('serviceWorker' in navigator&&location.protocol.startsWith('http')){try{navigator.serviceWorker.register('sw.js').catch(()=>{})}catch(e){}}
 const hm=location.hash.match(/import=([^&]+)/);
 if(hm){const code=hm[1];history.replaceState(null,'',location.pathname+location.search);modal({title:'Importa lista',msg:'Hai ricevuto una lista della spesa. Vuoi aggiungerla alle tue liste?',ok:'Importa',cb:()=>importCode(code)})}
