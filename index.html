@@ -231,7 +231,7 @@ async function push(){
  pushing=true;
  const {error}=await sb.rpc('scrivi_righe',{p_gruppo:S.sync.group,p_righe:rows});
  pushing=false;
- if(error){setSt('Non sincronizzato, riprovo appena possibile');return}
+ if(error){setSt('Non sincronizzato: '+(error.message||'errore'));return}
  rows.forEach(r=>{const k=r.tipo+':'+r.id;if(r.del)delete L[k];else L[k]=cur[k]});
  save();setSt('Sincronizzato');schedulePush();
 }
@@ -243,10 +243,11 @@ function rm(r){if(r.tipo==='s')S.shops=S.shops.filter(x=>x.id!==r.id);else if(r.
 function soft(){const a=document.activeElement;if(a&&/INPUT|TEXTAREA|SELECT/.test(a.tagName))return;render()}
 async function pull(){
  if(!live())return;
+ if(!S.sync.code){const c=await sb.from('gruppi').select('codice').eq('id',S.sync.group).single();if(c.data){S.sync.code=c.data.codice;save();if(view.n==='acc')render()}}
  let q=sb.from('righe').select('tipo,id,dati,ts,del,agg').eq('gruppo',S.sync.group).order('agg');
  if(S.sync.cursor)q=q.gt('agg',new Date(Date.parse(S.sync.cursor)-5000).toISOString());
  const {data,error}=await q;
- if(error){setSt('Non sincronizzato, riprovo appena possibile');return}
+ if(error){setSt('Non sincronizzato: '+(error.message||'errore'));return}
  if(!data.length){setSt('Sincronizzato');return}
  const last=data[data.length-1].agg,ord={s:0,l:1,i:2},cur=flat(),L=S.sync.last;let ch=false;
  data.sort((a,b)=>ord[a.tipo]-ord[b.tipo]);
